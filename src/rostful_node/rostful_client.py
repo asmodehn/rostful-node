@@ -149,4 +149,8 @@ class RostfulClient(object):
 
         return res_content.has_rocon
 
+    def __del__(self):
+        self._pipe_conn.close()  # closing the pipe connection since we wont use it anymore
+
+
 # TODO : test client with Rostful Node ( and detect ROS or not to confirm behvior )

@@ -80,6 +80,7 @@ class RostfulNodeProcess(object):
 
         self._proc = Process(target=spinner, args=(name, argv, self.pipe_conn, check_init, self._stop_event))
         self._proc.start()
+        self.pipe_conn.close()  # we don't need to use client connection from this process
         return other_end
 
     def terminate(self):

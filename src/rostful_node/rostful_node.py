@@ -24,7 +24,6 @@ import rostful_node.srv as srv
 from rosinterface import message_conversion as msgconv
 from rosinterface.action import ActionBack
 
-from multiprocessing import Pipe, Process, Event
 """
 Interface with ROS.
 """
