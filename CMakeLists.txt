@@ -67,7 +67,13 @@ if (CATKIN_ENABLE_TESTING)
     # Nose Tests
     ##############################################################################
 
-    catkin_add_nosetests(src/zmp/tests)
+    #catkin_add_nosetests(src/zmp/tests)  # this makes nose hang with --with-xunit sometimes. no idea why.
+    # One by one instead
+    catkin_add_nosetests(src/zmp/tests/test_message.py)
+    catkin_add_nosetests(src/zmp/tests/test_node.py)
+    catkin_add_nosetests(src/zmp/tests/test_service.py)
+
+    # Careful this will not support parallel testing, due to multiprocess environment used in tests
     catkin_add_nosetests(src/pyros/mockinterface/tests)
     # because of ROS these should be run in separate process each to avoid global side effect during tests
     #catkin_add_nosetests(src/pyros/rosinterface/tests)
@@ -80,6 +86,7 @@ if (CATKIN_ENABLE_TESTING)
     # find_package(catkin REQUIRED COMPONENTS rostest)
 
     # These rostests need to be run one by one ( because of rospy side effects)
+    # Note : using pyros-setup should fix this...
     catkin_add_nosetests(src/pyros/rosinterface/rostests/testService.py)
     catkin_add_nosetests(src/pyros/rosinterface/rostests/testStringTopic.py)
     catkin_add_nosetests(src/pyros/rosinterface/rostests/testRosInterface.py)

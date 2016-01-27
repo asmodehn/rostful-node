@@ -4,16 +4,19 @@ from __future__ import absolute_import
 # Unit test import (  will emulate ROS setup if needed )
 import nose
 import time
+
+
+
 try:
-    from pyros.rosinterface import RosInterface
-    from pyros.rosinterface import TopicBack
+    from pyros.baseinterface import DiffTuple
+    from pyros.rosinterface import RosInterface, TopicBack
 except ImportError as exc:
     import os
     import pyros.rosinterface
     import sys
     sys.modules["pyros.rosinterface"] = pyros.rosinterface.delayed_import_auto(base_path=os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..'))
-    from pyros.rosinterface import RosInterface
-    from pyros.rosinterface import TopicBack
+    from pyros.baseinterface import DiffTuple
+    from pyros.rosinterface import RosInterface, TopicBack
 
 import rospy
 import roslaunch
@@ -21,15 +24,12 @@ import rosnode
 from std_msgs.msg import String, Empty
 from std_srvs.srv import Empty as EmptySrv, Trigger
 
+from pyros.rosinterface.rostests import Timeout
 
 # useful test tools
 from pyros_setup import rostest_nose
 import unittest
 
-launch = None
-# test node process not setup by default (rostest dont need it here)
-empty_srv_process = None
-trigger_srv_process = None
 
 
 # This should have the same effect as the <name>.test file for rostest. Should be used only by nose ( or other python test tool )
@@ -39,31 +39,9 @@ def setup_module():
     if not rostest_nose.is_rostest_enabled():
         rostest_nose.rostest_nose_setup_module()
 
-        # Start roslaunch
-        global launch
-        launch = roslaunch.scriptapi.ROSLaunch()
-        launch.start()
-
-        # start required nodes - needs to match the content of *.test files for rostest to match
-        global empty_srv_process, trigger_srv_process
-        empty_srv_node = roslaunch.core.Node('pyros_test', 'emptyService.py', name='empty_service')
-        trigger_srv_node = roslaunch.core.Node('pyros_test', 'triggerService.py', name='trigger_service')
-        empty_srv_process = launch.launch(empty_srv_node)
-        trigger_srv_process = launch.launch(trigger_srv_node)
-
-        # we still need a node to interact with topics
-        rospy.init_node('ros_interface_test', anonymous=True, disable_signals=True)
-        # CAREFUL : this should be done only once per PROCESS
-        # Here we enforce TEST RUN 1<->1 MODULE 1<->1 PROCESS. ROStest style.
-
 
 def teardown_module():
     if not rostest_nose.is_rostest_enabled():
-        # finishing all process are finished
-        if empty_srv_process is not None:
-            empty_srv_process.stop()
-        if trigger_srv_process is not None:
-            trigger_srv_process.stop()
 
         rospy.signal_shutdown('test complete')
 
@@ -74,16 +52,44 @@ def teardown_module():
 def srv_cb(req):
     return req.request
 
-
+@nose.tools.nottest
 class TestRosInterface(unittest.TestCase):
-    def setUp(self):
-        self.strpub = rospy.Publisher('/test/string', String, queue_size=1)
-        self.emppub = rospy.Publisher('/test/empty', Empty, queue_size=1)
+    """
+    Main test fixture holding all tests
+    Subclasses can override setup / teardown to test different environments
+    """
 
-        self.interface = RosInterface()
+    launch = None
+    # test node process not setup by default (rostest dont need it here)
+    empty_srv_process = None
+    trigger_srv_process = None
 
-    def tearDown(self):
-        self.interface = None
+    # Class fixture ( once each )
+    @classmethod
+    def setup_class(cls):
+        # Start roslaunch
+        TestRosInterface.launch = roslaunch.scriptapi.ROSLaunch()
+        TestRosInterface.launch.start()
+
+        # start required nodes - needs to match the content of *.test files for rostest to match
+        global empty_srv_process, trigger_srv_process
+        empty_srv_node = roslaunch.core.Node('pyros_test', 'emptyService.py', name='empty_service')
+        trigger_srv_node = roslaunch.core.Node('pyros_test', 'triggerService.py', name='trigger_service')
+        TestRosInterface.empty_srv_process = TestRosInterface.launch.launch(empty_srv_node)
+        TestRosInterface.trigger_srv_process = TestRosInterface.launch.launch(trigger_srv_node)
+
+        # we still need a node to interact with topics
+        rospy.init_node('ros_interface_test', anonymous=True, disable_signals=True)
+        # CAREFUL : this should be done only once per PROCESS
+        # Here we enforce TEST RUN 1<->1 MODULE 1<->1 PROCESS. ROStest style.
+
+    @classmethod
+    def teardown_class(cls):
+        # finishing all process are finished
+        if TestRosInterface.empty_srv_process is not None:
+            TestRosInterface.empty_srv_process.stop()
+        if TestRosInterface.trigger_srv_process is not None:
+            TestRosInterface.trigger_srv_process.stop()
 
 # EXPOSE TOPICS + UPDATE Interface
     def test_topic_appear_expose_update(self):
@@ -106,6 +112,13 @@ class TestRosInterface(unittest.TestCase):
         self.assertTrue(topicname in self.interface.topics_args)
         # make sure the topic backend has been created
         self.assertTrue(topicname in self.interface.topics.keys())
+
+        # cleaning up
+        self.interface.expose_topics([])
+        # every added topic should be in the list of args
+        self.assertTrue(topicname not in self.interface.topics_args)
+        # topic backend has not been created since the update didn't run yet
+        self.assertTrue(topicname not in self.interface.topics.keys())
 
     def test_topic_appear_update_expose(self):
         """
@@ -131,10 +144,14 @@ class TestRosInterface(unittest.TestCase):
 
         # create the publisher and then try exposing the topic again, simulating
         # it coming online before expose call.
-        nonexistent_pub = rospy.Publisher(topicname, Empty, queue_size=1)
-        dt = self.interface.update()
-        self.assertEqual(dt.added, [])  # nothing added (not exposed)
-        self.assertEqual(dt.removed, [])  # nothing removed
+        nonexistent_pub = TopicBack._create_pub(topicname, Empty, queue_size=1)
+        with Timeout(100) as t:
+            while not t.timed_out and nonexistent_pub.resolved_name not in self.interface.topics_available:
+                dt = self.interface.update()
+                self.assertEqual(dt.added, [])  # nothing added (not exposed yet)
+                self.assertEqual(dt.removed, [])  # nothing removed
+
+        self.assertTrue(not t.timed_out)
         # TODO : do we need a test with subscriber ?
 
         # every added topic should be in the list of args
@@ -148,7 +165,23 @@ class TestRosInterface(unittest.TestCase):
         # make sure the topic backend has been created
         self.assertTrue(topicname in self.interface.topics.keys())
 
-        nonexistent_pub.unregister()  # https://github.com/ros/ros_comm/issues/111 ( topic is still registered on master... )
+        # removing publisher
+        TopicBack._remove_pub(nonexistent_pub)  # https://github.com/ros/ros_comm/issues/111 ( topic is still registered on master... )
+
+        # and update should be enough to cleanup
+        with Timeout(100) as t:
+            while not t.timed_out and not topicname in dt.removed:
+                dt = self.interface.update()
+                self.assertEqual(dt.added, [])  # nothing added
+
+        self.assertTrue(not t.timed_out)
+        self.assertTrue(topicname in dt.removed)
+        self.assertTrue(topicname not in self.interface.topics_available)
+
+        # every exposed topic should still be in the list of args
+        self.assertTrue(topicname in self.interface.topics_args)
+        # the backend should not be there any longer
+        self.assertTrue(topicname not in self.interface.topics.keys())
 
     def test_topic_expose_appear_update(self):
         """
@@ -185,7 +218,12 @@ class TestRosInterface(unittest.TestCase):
         # create the publisher and then try updating again, simulating
         # it coming online after expose call.
         nonexistent_pub = rospy.Publisher(topicname, Empty, queue_size=1)
-        dt = self.interface.update()
+        with Timeout(10) as t:
+            while not t.timed_out and topicname not in dt.added:
+                dt = self.interface.update()
+                self.assertEqual(dt.removed, [])  # nothing removed
+
+        self.assertTrue(not t.timed_out)
         self.assertTrue(topicname in dt.added)  # detected
         # TODO : do we need a test with subscriber ?
 
@@ -220,16 +258,21 @@ class TestRosInterface(unittest.TestCase):
         # create the publisher and then try exposing the topic again, simulating
         # it coming online before expose call.
         nonexistent_pub = TopicBack._create_pub(topicname, Empty, queue_size=1)
-        dt = self.interface.update()
-        self.assertEqual(dt.added, [])  # nothing added (not exposed)
-        self.assertEqual(dt.removed, [])  # nothing removed
+        with Timeout(5) as t:
+            while not t.timed_out and topicname not in self.interface.topics_available:
+                dt = self.interface.update()
+                self.assertEqual(dt.added, [])  # nothing added (not exposed)
+                self.assertEqual(dt.removed, [])  # nothing removed
         # TODO : do we need a test with subscriber ?
 
-        # every added topic should be in the list of args
+        self.assertTrue(not t.timed_out)
+        # topic should be in the list of args yet (not exposed)
         self.assertTrue(topicname not in self.interface.topics_args)
         # the backend should not have been created
         self.assertTrue(topicname not in self.interface.topics.keys())
 
+        # Here we are sure the internal state has topic_name registered
+        # will be exposed right away
         dt = self.interface.expose_topics([topicname])
         self.assertTrue(topicname in dt.added)  # detected and added
         self.assertEqual(dt.removed, [])  # nothing removed
@@ -280,8 +323,6 @@ class TestRosInterface(unittest.TestCase):
         :return:
         """
 
-        #TODO : test disappear ( how ? https://github.com/ros/ros_comm/issues/111 )
-
         topicname = '/test/nonexistent4'
         # every added topic should be in the list of args
         self.assertTrue(topicname not in self.interface.topics_args)
@@ -309,9 +350,14 @@ class TestRosInterface(unittest.TestCase):
             # it coming online before expose call.
             nonexistent_pub = TopicBack._create_pub(topicname, Empty, queue_size=1)
 
-            dt = self.interface.update()
-            self.assertTrue(topicname in dt.added)  # detected
-            self.assertEqual(dt.removed, [])  # nothing removed
+            with Timeout(100) as t:
+                dt = DiffTuple([], [])
+                while not t.timed_out and nonexistent_pub.resolved_name not in dt.added:
+                    dt = self.interface.update()
+                    self.assertEqual(dt.removed, [])  # nothing removed
+
+            self.assertTrue(not t.timed_out)
+            self.assertTrue(nonexistent_pub.resolved_name in dt.added)  # detected
             # TODO : do we need a test with subscriber ?
 
             # every added topic should be in the list of args
@@ -329,9 +375,14 @@ class TestRosInterface(unittest.TestCase):
             self.assertTrue(topicname in self.interface.topics.keys())
             # Note the Topic implementation should take care of possible errors in this case
 
-            dt = self.interface.update()
+            with Timeout(100) as t:
+                dt = DiffTuple([], [])
+                while not t.timed_out and topicname not in dt.removed:
+                    dt = self.interface.update()
+                    self.assertEqual(dt.added, [])  # nothing added
+
+            self.assertTrue(not t.timed_out)
             self.assertTrue(topicname in dt.removed)  # detected lost
-            self.assertEqual(dt.added, [])  # nothing added
             # every exposed topic should remain in the list of args ( in case regex match another topic )
             self.assertTrue(topicname in self.interface.topics_args)
             # make sure the topic backend should NOT be there any longer
@@ -340,6 +391,16 @@ class TestRosInterface(unittest.TestCase):
         appear_disappear()
 
         # test that coming back actually also works
+
+        # Note : for the cache version we need update to run in between to make sure the cache callback for dropped
+        # interface doesnt interfere with the new topic coming up.
+        # TODO fix this problem (cache node / interface update not spinning fast enough to detect the change)
+        # HOW ?
+        # -> cache node (or proxy??) with possibility to mask topics + node to not trigger change ???
+        # -> splitting subscribers and publishers will make it better to not confuse what goes up/down ???
+        time.sleep(2)
+        dt = self.interface.update()
+
         appear_disappear()
 
         self.interface.expose_topics([])
@@ -388,7 +449,14 @@ class TestRosInterface(unittest.TestCase):
         # create the publisher and then try exposing the topic again, simulating
         # it coming online before expose call.
         nonexistent_pub = rospy.Publisher(topicname, Empty, queue_size=1)
-        dt = self.interface.update()
+
+        with Timeout(5) as t:
+            dt = DiffTuple([], [])
+            while not t.timed_out and nonexistent_pub.resolved_name not in dt.added:
+                dt = self.interface.update()
+                self.assertEqual(dt.removed, [])  # nothing removed
+
+        self.assertTrue(not t.timed_out)
         self.assertTrue(nonexistent_pub.resolved_name in dt.added)  # added now because it just appeared
         self.assertEqual(dt.removed, [])  # nothing removed
         # TODO : do we need a test with subscriber ?
@@ -436,12 +504,10 @@ class TestRosInterface(unittest.TestCase):
         self.assertTrue(servicename not in self.interface.services.keys())
 
         # NOTE : We need to wait to make sure the tests nodes are started...
-        from pyros.baseinterface import DiffTuple
-        start = time.time()
-        timeout = 15
-        dt = DiffTuple([], [])
-        while (not dt or servicename not in dt[0]) and time.time() - start < timeout:
-            dt = self.interface.update()
+        with Timeout(5) as t:
+            while not t.timed_out and servicename not in dt[0]:
+                dt = self.interface.update()
+
         # TODO : improve that by providing an easier interface for it.
 
         # every exposed service should remain in the list of args ( in case regex match another service )
@@ -474,16 +540,21 @@ class TestRosInterface(unittest.TestCase):
         # it coming online before expose call.
         nonexistent_srv = rospy.Service(servicename, EmptySrv, srv_cb)
         try:
-            dt = self.interface.update()
-            self.assertEqual(dt.added, [])  # nothing added (not exposed yet)
-            self.assertEqual(dt.removed, [])  # nothing removed
+            with Timeout(5) as t:
+                while not t.timed_out and nonexistent_srv.resolved_name not in self.interface.services_available:
+                    dt = self.interface.update()
+                    self.assertEqual(dt.added, [])  # nothing added (not exposed yet)
+                    self.assertEqual(dt.removed, [])  # nothing removed
 
             # every added service should be in the list of args
             self.assertTrue(servicename not in self.interface.services_args)
             # the backend should not have been created
             self.assertTrue(servicename not in self.interface.services.keys())
 
+            # here we are sure the interface knows the service is available
+            # it will be exposed right now
             self.interface.expose_services([servicename])
+
             # every exposed service should remain in the list of args ( in case regex match another service )
             self.assertTrue(servicename in self.interface.services_args)
             # make sure the service backend has been created
@@ -529,9 +600,13 @@ class TestRosInterface(unittest.TestCase):
         # it coming online after expose call.
         nonexistent_srv = rospy.Service(servicename, EmptySrv, srv_cb)
         try:
-            dt = self.interface.update()
+            with Timeout(5) as t:
+                dt = DiffTuple([], [])
+                while not t.timed_out and nonexistent_srv.resolved_name not in dt.added:
+                    dt = self.interface.update()
+                    self.assertEqual(dt.removed, [])  # nothing removed
+
             self.assertTrue(nonexistent_srv.resolved_name in dt.added)  # nonexistent_srv added
-            self.assertEqual(dt.removed, [])  # nothing removed
             # every exposed service should remain in the list of args ( in case regex match another service )
             self.assertTrue(servicename in self.interface.services_args)
             # make sure the service backend has been created
@@ -640,8 +715,12 @@ class TestRosInterface(unittest.TestCase):
         self.assertTrue(servicename in self.interface.services.keys())
         # Note the service implementation should take care of possible errors in this case
 
-        dt = self.interface.update()
-        self.assertEqual(dt.added, [])  # nothing added
+        # wait here until service actually disappear from cache proxy
+        with Timeout(5) as t:
+            while not t.timed_out and nonexistent_srv.resolved_name not in dt.removed:
+                dt = self.interface.update()
+                self.assertEqual(dt.added, [])  # nothing added
+
         self.assertTrue(nonexistent_srv.resolved_name in dt.removed)  # nonexistent_srv removed
         # every exposed service should remain in the list of args ( in case regex match another service )
         self.assertTrue(servicename in self.interface.services_args)
@@ -715,62 +794,17 @@ class TestRosInterface(unittest.TestCase):
         self.assertTrue(servicename not in self.interface.services.keys())
 
 
-class timeout(object):
-    """
-    Small useful timeout class
-    """
-    def __init__(self, seconds):
-        self.seconds = seconds
-
-    def __enter__(self):
-        self.die_after = time.time() + self.seconds
-        return self
-
-    def __exit__(self, type, value, traceback):
-        pass
-
-    @property
-    def timed_out(self):
-        return time.time() > self.die_after
-
-
-# Testing with Connection Cache
-class TestRosInterfaceCache(TestRosInterface):
+@nose.tools.istest
+class TestRosInterfaceNoCache(TestRosInterface):
     def setUp(self):
-        self.connection_cache_node = roslaunch.core.Node('rocon_python_comms', 'connection_cache.py', name='connection_cache',
-                                                         remap_args=[('/rocon/connection_cache/list', '/pyros_ros/connections_list')])
-        try:
-            self.connection_cache_proc = launch.launch(self.connection_cache_node)
-        except roslaunch.RLException as rlexc:
-            raise nose.SkipTest("Connection Cache Node not found (part of rocon_python_comms pkg). Skipping test.")
+        self.strpub = rospy.Publisher('/test/string', String, queue_size=1)
+        self.emppub = rospy.Publisher('/test/empty', Empty, queue_size=1)
 
-        # wait for node to be started
-        node_api = None
-        with timeout(5) as t:
-            while not t.timed_out and node_api is None:
-                node_api = rosnode.get_api_uri(rospy.get_master(), 'connection_cache')
-
-        assert node_api is not None  # make sure the connection cache node is started before moving on.
-
-        super(TestRosInterfaceCache, self).setUp()
+        self.interface = RosInterface(False)
 
     def tearDown(self):
-        super(TestRosInterfaceCache, self).tearDown()
+        self.interface = None
 
-        self.connection_cache_proc.stop()
-        while self.connection_cache_proc.is_alive():
-            time.sleep(0.2)  # waiting for cache node to die
-        assert not self.connection_cache_proc.is_alive()
-        time.sleep(1)  # TODO : investigate : we shouldnt need this
-
-
-    # explicitely added here only needed to help the debugger.
-    # This will fail because of https://github.com/ros/ros_comm/issues/111
-    # The topic from previous test is still registered on master...
-    def test_topic_expose_appear_update(self):
-        super(TestRosInterfaceCache, self).test_topic_expose_appear_update()
-
-        
 if __name__ == '__main__':
 
     # Note : Tests should be able to run with nosetests, or rostest ( which will launch nosetest here )
