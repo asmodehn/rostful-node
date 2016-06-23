@@ -111,9 +111,9 @@ class DefFile(object):
         
         d['Manifest'] = self.manifest.tojson()
         
-        d['Definitions'] = dict([(dfn.type + ':' + dfn.name, dfn.tojson()) for dfn in self.definitions])
+        d['Definitions'] = {dfn.type + ':' + dfn.name: dfn.tojson() for dfn in self.definitions}
         
-        d['Sections'] = dict([(section_name, section.tojson()) for section_name, section in self.sections.iteritems()])
+        d['Sections'] = {section_name: section.tojson() for section_name, section in self.sections.iteritems()}
         
         return d
     
